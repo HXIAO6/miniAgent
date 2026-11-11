@@ -1,0 +1,20 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 环境变量（千万别传）
+.env
+.env.local
+
+# VS Code 配置
+.vscode/
+
+# 系统文件
+.DS_Store
+Thumbs.db
