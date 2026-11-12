@@ -1,0 +1,5 @@
+# GitHub 今日热门开源项目速报
+
+> 数据源更新至 11 月 8 日 | 生成时间：2026-11-12
+
+Rust 逆向引擎 **craft-anything** 单日涨 3836 星居首，可让 AI 复刻任意网站、App 与游戏；**dsh-superagent-prototype** 涨 3751 星居次；**dsh-Go**、**unslop**、**worktrunk** 等 AI Agent 工具同热。

@@ -4,6 +4,8 @@ import datetime
 from dotenv import load_dotenv
 from agents import Agent, Runner, function_tool, set_tracing_disabled
 
+#能对话、能记忆、能调工具、流式输出
+
 # ================= 1. 基础配置 =================
 load_dotenv()
 set_tracing_disabled(True)
