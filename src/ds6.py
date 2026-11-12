@@ -4,24 +4,23 @@ import datetime
 import json
 import gradio as gr
 from dotenv import load_dotenv
-from agents import Agent, Runner, function_tool, set_tracing_disabled, ModelSettings
+from agents import Agent, Runner, function_tool, set_tracing_disabled, ModelSettings, set_default_openai_api
 from tavily import TavilyClient
 
-
-#构建成浏览器页面
 # ================= 1. 基础配置 =================
 load_dotenv()
 set_tracing_disabled(True)
-    
+set_default_openai_api("chat_completions")
+
 base_url = os.getenv("OPENAI_BASE_URL")
 if base_url:
     os.environ["OPENAI_API_BASE"] = base_url
 
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
-# 定义历史文件路径 (完全采用你的修改)
+# 定义历史文件路径
 project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-history_dir = os.path.join(project_dir, "mem")
+history_dir = os.path.join(project_dir, "sessions")
 os.makedirs(history_dir, exist_ok=True)
 HISTORY_FILE = os.path.join(history_dir, "history.json")
 
@@ -101,10 +100,8 @@ summarizer_agent = Agent(
 )
 
 async def compress_history(conversation_history):
-    """如果历史记录太长，就调用这个函数进行压缩"""
     if len(conversation_history) > 12:
         print("\n⚙️ [系统后台] 对话太长，正在启动记忆压缩...")
-        
         valid_messages = [msg for msg in conversation_history if msg['role'] != 'system']
         old_messages = valid_messages[:-4]
         recent_messages = valid_messages[-4:]
@@ -115,104 +112,95 @@ async def compress_history(conversation_history):
             
         result = await Runner.run(summarizer_agent, f"请压缩以下对话：\n{history_text}")
         summary = result.final_output
-        
         print(f"⚙️ [系统后台] 压缩完成！摘要内容：{summary[:30]}...")
         
         new_history = [
             {"role": "system", "content": f"【前情提要】: {summary}"}
         ] + recent_messages
-        
         return new_history
     return conversation_history
 
 # ================= 5. 网页端核心交互逻辑 =================
-async def chat_generator(user_input, history_list):
-    # 将网页格式转为 Agent 需要的格式
-    conversation_history = [{"role": m["role"], "content": m["content"]} for m in history_list]
-    conversation_history.append({"role": "user", "content": user_input})
+async def predict(message, history):
+    # 1. 转换历史格式
+    conversation_history = [{"role": m["role"], "content": m["content"]} for m in history]
+    conversation_history.append({"role": "user", "content": message})
     
-    # 1. 后台静默压缩记忆
+    # 2. 先推给前端用户消息
+    history.append({"role": "user", "content": message})
+    yield "", history
+    
+    # 3. 后台压缩
     conversation_history = await compress_history(conversation_history)
     
-    # 2. 发起流式对话
+    # 4. 发起流式
     result = Runner.run_streamed(my_agent, conversation_history)
     
     current_reply = ""
     is_thinking = False
-    
-    async for event in result.stream_events():
-        if event.type == "raw_response_event" and hasattr(event.data, "delta"):
-            e_type = getattr(event.data, "type", "")
-            
-            # 处理思考过程
-            if e_type in ["response.reasoning_summary_text.delta", "response.reasoning_text.delta"]:
-                if not is_thinking:
-                    current_reply += "\n\n> 🧠 **思考中**: "
-                    is_thinking = True
-                current_reply += event.data.delta
-                
-            # 处理最终回答
-            elif e_type == "response.output_text.delta":
-                if is_thinking:
-                    current_reply += "\n\n"
-                    is_thinking = False
-                current_reply += event.data.delta
-                
-            yield current_reply
-            
-        # 处理工具调用
-        elif event.type == "run_item_stream_event":
-            if event.name == "tool_called":
-                tool_name = getattr(event.item.raw_item, "name", "未知工具")
-                current_reply += f"\n\n> 🔧 **正在调用工具**: `{tool_name}`\n\n"
-                is_thinking = False
-                yield current_reply
-
-    # 对话结束，保存历史记录
-    full_history = [{"role": m["role"], "content": m["content"]} for m in history_list]
-    full_history.append({"role": "user", "content": user_input})
-    full_history.append({"role": "assistant", "content": current_reply})
+    has_appended = False # 标记是否已经创建了 assistant 气泡
     
     try:
+        async for event in result.stream_events():
+            if event.type == "raw_response_event" and hasattr(event.data, "delta"):
+                e_type = getattr(event.data, "type", "")
+                
+                text_chunk = ""
+                if e_type in ["response.reasoning_summary_text.delta", "response.reasoning_text.delta"]:
+                    if not is_thinking:
+                        text_chunk += "\n\n> 🧠 **思考中**: "
+                        is_thinking = True
+                    text_chunk += event.data.delta
+                elif e_type == "response.output_text.delta":
+                    if is_thinking:
+                        text_chunk += "\n\n"
+                        is_thinking = False
+                    text_chunk += event.data.delta
+                
+                if text_chunk:
+                    current_reply += text_chunk
+                    if not has_appended:
+                        history.append({"role": "assistant", "content": current_reply})
+                        has_appended = True
+                    else:
+                        history[-1]["content"] = current_reply
+                    yield "", history
+                    
+            elif event.type == "run_item_stream_event":
+                if event.name == "tool_called":
+                    tool_name = getattr(event.item.raw_item, "name", "未知工具")
+                    current_reply += f"\n\n> 🔧 **正在调用工具**: `{tool_name}`\n\n"
+                    is_thinking = False
+                    if not has_appended:
+                        history.append({"role": "assistant", "content": current_reply})
+                        has_appended = True
+                    else:
+                        history[-1]["content"] = current_reply
+                    yield "", history
+
+    except Exception as e:
+        if not has_appended:
+            history.append({"role": "assistant", "content": f"❌ 发生错误: {e}"})
+        else:
+            history[-1]["content"] += f"\n\n❌ 发生错误: {e}"
+        yield "", history
+
+    # 5. 结束后保存到本地
+    try:
+        clean_history = [m for m in history if m["content"].strip() != ""]
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(full_history, f, ensure_ascii=False, indent=2)
+            json.dump(clean_history, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"保存失败: {e}")
-
-def predict(message, history):
-    """包装成 Gradio 可识别的生成器"""
-    # history 是列表，格式为 [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
-    
-    # 先追加用户消息
-    history.append({"role": "user", "content": message})
-    yield "", history
-    
-    # 准备接收回复
-    history.append({"role": "assistant", "content": ""})
-    
-    # 运行异步生成器
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    async_gen = chat_generator(message, history[:-2]) # 传入刚才的完整历史
-    
-    try:
-        while True:
-            try:
-                chunk = loop.run_until_complete(async_gen.__anext__())
-                history[-1]["content"] = chunk
-                yield "", history
-            except StopAsyncIteration:
-                break
-    finally:
-        loop.close()
 
 # ================= 6. 加载历史记录 =================
 def load_history():
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                # 彻底过滤空数据
+                return [m for m in data if m.get("content", "").strip() != ""]
         except Exception:
             return []
     return []
@@ -220,17 +208,33 @@ def load_history():
 # ================= 7. 构建网页界面 =================
 with gr.Blocks(title="全能 AI 助手") as demo:
     gr.Markdown("# 🤖 全能 AI 助手 (网页版)")
-    gr.Markdown("支持自动记忆、记忆压缩、联网搜索、本地文件读写。")
     
-    chatbot = gr.Chatbot(height=600, value=load_history)
+    # 核心修复 1：使用 gr.State 管理状态，避免初始化加载失败
+    chat_history_state = gr.State(load_history())
+    
+    # 绑定初始数据
+    chatbot = gr.Chatbot(height=600, value=load_history())
     msg = gr.Textbox(placeholder="输入你的问题，按回车发送...", label="输入框", scale=4)
     clear = gr.Button("清空记忆", variant="primary", scale=1)
 
-    # 交互逻辑
-    msg.submit(predict, [msg, chatbot], [msg, chatbot])
-    clear.click(lambda: ([], []), None, [chatbot, chatbot], queue=False).then(
-        lambda: os.remove(HISTORY_FILE) if os.path.exists(HISTORY_FILE) else None
+    # 核心修复 2：消息提交交互
+    msg.submit(
+        predict, 
+        [msg, chat_history_state], 
+        [msg, chat_history_state]
+    ).then(
+        # 把状态里的数组同步给 UI 渲染，并过滤空值
+        lambda h: [m for m in h if m.get("content", "").strip() != ""],
+        [chat_history_state],
+        [chatbot]
     )
+
+    # 清空记忆交互
+    def clear_all():
+        if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
+        return [], []
+        
+    clear.click(clear_all, None, [chat_history_state, chatbot], queue=False)
 
 if __name__ == "__main__":
     demo.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True, theme=gr.themes.Soft())

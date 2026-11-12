@@ -174,7 +174,7 @@ def main():
     print("="*60)
     
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    history_dir = os.path.join(project_dir, "mem")
+    history_dir = os.path.join(project_dir, "sessions")
     os.makedirs(history_dir, exist_ok=True)
     HISTORY_FILE = os.path.join(history_dir, "history.json")
     conversation_history = []
