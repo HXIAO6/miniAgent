@@ -4,6 +4,9 @@ import datetime
 from dotenv import load_dotenv
 from agents import Agent, Runner, function_tool, set_tracing_disabled
 
+
+#能对话
+
 load_dotenv()
 set_tracing_disabled(True)
 
