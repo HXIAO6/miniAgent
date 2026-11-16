@@ -20,3 +20,9 @@ env/
 Thumbs.db
 
 sessions/
+
+# 本地知识库、模型与运行产物
+knowledge/
+data/
+models/
+.cache/
