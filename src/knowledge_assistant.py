@@ -347,6 +347,49 @@ async def refresh_knowledge():
         return f"知识库状态读取失败：{error}"
 
 
+async def refresh_document_panel():
+    """同时刷新文件清单、选择器和计数，清空过期候选及删除确认。"""
+    def snapshot():
+        with knowledge_base._lock:
+            return knowledge_base.list_documents(), knowledge_base.status()
+    documents, status = await asyncio.to_thread(snapshot)
+    rows = [[doc["source"], doc["chunk_count"], "存在" if doc["has_file"] else "缺失（可清理残留索引）"]
+            for doc in documents]
+    return (rows, gr.Dropdown(choices=[doc["source"] for doc in documents], value=[], multiselect=True),
+            status, False, "", [])
+
+
+def preview_deletion(sources):
+    """每次选择变化都撤销之前的确认，避免换了文件却沿用旧确认。"""
+    if not sources:
+        return "", False
+    return ("待删除文档：\n" + "\n".join(f"• {source}" for source in sources)
+            + f"\n共 {len(sources)} 个。删除后不再用于回答，原文件移入回收站。历史聊天和旧版本保留。", False)
+
+
+async def delete_documents(sources, confirmed):
+    """仅供文档管理界面调用，不注册为 Agent 工具。逐文件报告结果，允许部分失败。"""
+    if not isinstance(sources, list) or not sources:
+        return "请先选择要删除的文档。", *(gr.skip() for _ in range(6))
+    if confirmed is not True:
+        return "请核对待删除文件列表，并勾选确认后再删除。", *(gr.skip() for _ in range(6))
+    def remove():
+        messages = []
+        for source in dict.fromkeys(sources):
+            try:
+                result = knowledge_base.delete_document(source)
+                messages.append(f"已删除：{source}\n回收站：{result['trash_path']}")
+            except Exception as error:
+                messages.append(f"未删除：{source}：{error}")
+        return "\n\n".join(messages)
+    result = await asyncio.to_thread(remove)
+    try:
+        return result, *await refresh_document_panel()
+    except Exception as error:
+        # 删除结果不能被一次刷新失败掩盖。清空候选与确认，并要求手动刷新清单。
+        return result + f"\n清单刷新失败：{error}，请手动刷新。", gr.skip(), gr.skip(), gr.skip(), False, "", []
+
+
 with gr.Blocks(title="本地知识库助手") as demo:
     gr.Markdown("# 🤖 本地知识库助手")
     gr.Markdown("上传资料后提问，回答附来源与原文。检索在本机完成，命中的片段会发送给当前配置的大模型服务。")
@@ -360,8 +403,16 @@ with gr.Blocks(title="本地知识库助手") as demo:
         gr.Markdown("重叠须小于块大小的一半。修改分块设置后，重新导入同一资料即可重新索引。")
         import_button = gr.Button("导入 / 更新资料", variant="primary")
         import_status = gr.Textbox(label="导入结果", interactive=False)
-        refresh_button = gr.Button("查看知识库状态")
+        refresh_button = gr.Button("刷新文档列表与状态")
         kb_status = gr.Textbox(label="知识库状态", interactive=False)
+        documents_table = gr.Dataframe(headers=["文档", "文本块数", "原文件"],
+                                       datatype=["str", "number", "str"], interactive=False,
+                                       label="知识库文档（含原文缺失的残留索引）")
+        delete_sources = gr.Dropdown(choices=[], value=[], multiselect=True, label="选择要从知识库删除的文档")
+        deletion_preview = gr.Textbox(label="待删除清单", interactive=False)
+        delete_confirmed = gr.Checkbox(value=False, label="我已核对文件，确认删除并移入回收站")
+        delete_button = gr.Button("删除所选文档", variant="stop")
+        deletion_status = gr.Textbox(label="删除结果", interactive=False)
     use_knowledge = gr.Checkbox(value=True, label="优先检索知识库（普通闲聊时可关闭）")
     only_knowledge = gr.Checkbox(value=True, label="仅依据知识库回答（无依据时直接说明；关闭联网和文件工具）")
     with gr.Accordion("检索设置与候选分数", open=False):
@@ -385,10 +436,18 @@ with gr.Blocks(title="本地知识库助手") as demo:
     clear = gr.Button("清空聊天记录（保留知识库）")
     msg.submit(predict_with_scores, [msg, chatbot, use_knowledge, top_k, candidate_k, retrieval_mode,
                                    use_rerank, rerank_threshold, rerank_k, only_knowledge],
-               [msg, chatbot, scores], concurrency_limit=1)
+               [msg, chatbot, scores], concurrency_limit=1, concurrency_id="knowledge_operations")
     clear.click(clear_history, None, [chatbot, msg], queue=False)
-    import_button.click(upload_documents, [files, chunk_chars, overlap_chars], [import_status], concurrency_limit=1)
-    refresh_button.click(refresh_knowledge, None, [kb_status])
+    # 导入、删除和整轮聊天共用一个队列，避免正在生成的回答与删除操作交错。
+    panel_outputs = [documents_table, delete_sources, kb_status, delete_confirmed, deletion_preview, scores]
+    import_button.click(upload_documents, [files, chunk_chars, overlap_chars], [import_status],
+                        concurrency_limit=1, concurrency_id="knowledge_operations").then(
+                            refresh_document_panel, None, panel_outputs)
+    refresh_button.click(refresh_document_panel, None, panel_outputs)
+    delete_sources.change(preview_deletion, [delete_sources], [deletion_preview, delete_confirmed], queue=False)
+    delete_button.click(delete_documents, [delete_sources, delete_confirmed], [deletion_status, *panel_outputs],
+                        concurrency_limit=1, concurrency_id="knowledge_operations")
+    demo.load(refresh_document_panel, None, panel_outputs)
 
 if __name__ == "__main__":
     demo.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True, theme=gr.themes.Soft())
