@@ -1,0 +1,13 @@
+{
+  "description": "Held-out phrasings and missing fields on the same synthetic corpus; not independent real-world documents.",
+  "questions": [
+    {"id": "val_error", "type": "answerable", "query": "译码器遇到了 E1024，要先记下什么信息？", "expected_sources": ["错误码手册.md"], "supported_facts": ["指令值"], "missing_facts": []},
+    {"id": "val_backup", "type": "answerable", "query": "配置文件的历史备份能留多少天？", "expected_sources": ["数据备份.md"], "supported_facts": ["十四天"], "missing_facts": []},
+    {"id": "val_model", "type": "answerable", "query": "型号 XJ910 的直流供电电压是多少？", "expected_sources": ["供电规格.md"], "supported_facts": ["24V"], "missing_facts": []},
+    {"id": "val_cooling", "type": "answerable", "query": "换星舟的冷却液之前需要先做什么？", "expected_sources": ["星舟维护.md"], "supported_facts": ["关闭设备"], "missing_facts": []},
+    {"id": "val_missing_size", "type": "unanswerable", "query": "XJ900 的机身重量和外形尺寸是多少？", "expected_sources": [], "supported_facts": [], "missing_facts": ["重量", "外形尺寸"]},
+    {"id": "val_unrelated", "type": "unanswerable", "query": "番茄炒鸡蛋应该放多少克盐？", "expected_sources": [], "supported_facts": [], "missing_facts": ["盐的用量"]},
+    {"id": "val_missing_liquid", "type": "partial", "query": "星舟更换冷却液的间隔和每次加注的升数是多少？", "expected_sources": ["星舟维护.md"], "supported_facts": ["九天"], "missing_facts": ["加注升数"]},
+    {"id": "val_missing_backup", "type": "partial", "query": "配置每天几点备份，备份存在哪个服务器地址？", "expected_sources": ["数据备份.md"], "supported_facts": ["凌晨三点"], "missing_facts": ["服务器地址"]}
+  ]
+}

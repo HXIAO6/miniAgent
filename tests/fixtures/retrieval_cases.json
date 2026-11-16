@@ -1,0 +1,23 @@
+{
+  "description": "Synthetic baseline only; expected sources and facts are manually labeled. No production documents are used.",
+  "documents": [
+    {"source": "错误码手册.md", "text": "# 译码错误\n错误码 E1024 表示 decode_instruction 收到了非法操作码。遇到 E1024 应先记录指令值，再重置译码器。"},
+    {"source": "恢复指南.md", "text": "# 启动恢复\n设备无法开机、启动失败时，应先确认供电连接，再检查启动日志。\n# 解析恢复\n指令解析失败后，可重置译码器并重新加载有效指令。"},
+    {"source": "星舟维护.md", "text": "# 星舟设备冷却系统\n星舟设备的冷却液每隔九天更换一次。更换时应先关闭设备。"},
+    {"source": "供电规格.md", "text": "# XJ900\n型号 XJ900 使用 12V 直流供电。\n# XJ910\n型号 XJ910 使用 24V 直流供电。"},
+    {"source": "数据备份.md", "text": "# 备份策略\n配置文件每天凌晨三点备份一次，备份保留十四天。"},
+    {"source": "园艺笔记.md", "text": "# 玫瑰养护\n玫瑰花每周浇水一次，保持土壤透气。"}
+  ],
+  "questions": [
+    {"id": "exact_code", "type": "answerable", "query": "E1024 是什么意思？", "expected_sources": ["错误码手册.md"], "supported_facts": ["非法操作码"], "missing_facts": []},
+    {"id": "function_name", "type": "answerable", "query": "decode_instruction 报错后应先做什么？", "expected_sources": ["错误码手册.md"], "supported_facts": ["记录指令值", "重置译码器"], "missing_facts": []},
+    {"id": "semantic_startup", "type": "answerable", "query": "机器启动不起来，应该从哪里排查？", "expected_sources": ["恢复指南.md"], "supported_facts": ["供电连接", "启动日志"], "missing_facts": []},
+    {"id": "maintenance", "type": "answerable", "query": "星舟的冷却液多久换一次？", "expected_sources": ["星舟维护.md"], "supported_facts": ["九天"], "missing_facts": []},
+    {"id": "exact_model", "type": "answerable", "query": "XJ900 用多少伏电源？", "expected_sources": ["供电规格.md"], "supported_facts": ["12V"], "missing_facts": []},
+    {"id": "multi_source", "type": "answerable", "query": "星舟冷却液更换周期和配置备份保留时长分别是多少？", "expected_sources": ["星舟维护.md", "数据备份.md"], "supported_facts": ["九天", "十四天"], "missing_facts": []},
+    {"id": "missing_warranty", "type": "unanswerable", "query": "星舟设备的保修年限是多少？", "expected_sources": [], "supported_facts": [], "missing_facts": ["保修年限"]},
+    {"id": "unrelated", "type": "unanswerable", "query": "月球背面陨石坑的命名规则是什么？", "expected_sources": [], "supported_facts": [], "missing_facts": ["月球陨石坑命名规则"]},
+    {"id": "partial_model", "type": "partial", "query": "XJ900 的供电电压和最大工作电流分别是多少？", "expected_sources": ["供电规格.md"], "supported_facts": ["12V"], "missing_facts": ["最大工作电流"]},
+    {"id": "partial_coolant", "type": "partial", "query": "星舟冷却液多久更换一次，指定品牌是什么？", "expected_sources": ["星舟维护.md"], "supported_facts": ["九天"], "missing_facts": ["冷却液指定品牌"]}
+  ]
+}

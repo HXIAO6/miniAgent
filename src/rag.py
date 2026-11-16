@@ -5,19 +5,44 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import threading
 
 import chromadb
 from chromadb.config import Settings
 import httpx
+import jieba
+from rank_bm25 import BM25Plus
 
-#检索相关片段，生成来源信息
+# 检索分三阶段：两路召回 → RRF 融合 → 可选重排与阈值过滤。
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 KNOWLEDGE_DIR = PROJECT_DIR / "knowledge"
 CHROMA_DIR = PROJECT_DIR / "data" / "chroma"
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
+RRF_K = 60  # 融合只使用各通道名次，避免直接相加不同尺度的原始分数。
+DEFAULT_RERANK_THRESHOLD = 0.2  # 合成校准集的初始工作点；真实资料仍需调参，不代表正确率。
+_tokenizer = jieba.Tokenizer()
+_tokenizer.tmp_dir = str(PROJECT_DIR / ".cache")
+_tokenizer.cache_file = "jieba-rag.cache"
+_tokenizer_lock = threading.Lock()
+_stopwords = {"的", "了", "是", "在", "和", "与", "吗", "呢", "请", "问", "我", "你",
+              "什么", "怎么", "如何", "哪些", "根据", "一下", "一个"}
+
+
+def tokenize(text: str) -> list[str]:
+    """中文分词；保留错误码、函数名整体，英文统一小写。"""
+    tokens = []
+    for part in re.findall(r"[a-zA-Z0-9_]+(?:[./:\-][a-zA-Z0-9_]+)*|[\u3400-\u9fff]+", text):
+        if re.fullmatch(r"[\u3400-\u9fff]+", part):
+            with _tokenizer_lock:
+                (PROJECT_DIR / ".cache").mkdir(exist_ok=True)
+                words = list(_tokenizer.cut(part))
+            tokens.extend(word for word in words if word.strip() and word not in _stopwords)
+        else:
+            tokens.append(part.casefold())
+    return tokens
 
 
 class KnowledgeBase:
@@ -29,6 +54,7 @@ class KnowledgeBase:
         self._lock = threading.RLock()
         self._collection = None
         self._client = None
+        self._bm25_cache = None
 
     @property
     def collection(self):
@@ -49,7 +75,7 @@ class KnowledgeBase:
             return self._collection
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Serialize GPU requests; never silently truncate oversized chunks."""
+        """串行调用本地 Ollama；过长输入报错，不静默截断后再生成向量。"""
         vectors = []
         with self._lock, httpx.Client(timeout=180, trust_env=False) as client:
             for start in range(0, len(texts), 8):
@@ -74,21 +100,110 @@ class KnowledgeBase:
                     vectors.append([x / norm for x in vector])
         return vectors
 
-    def search(self, query: str, top_k: int = 4) -> list[dict]:
+    def invalidate_lexical_index(self):
+        """资料变化后清除内存 BM25 索引，下次检索再从最新文本构建。"""
+        with self._lock:
+            self._bm25_cache = None
+
+    def _lexical_index(self):
+        if self._bm25_cache is None:
+            result = self.collection.get(include=["documents", "metadatas"])
+            rows = sorted([dict(id=chunk_id, text=text, **meta)
+                           for chunk_id, text, meta in zip(
+                               result["ids"], result["documents"], result["metadatas"])],
+                          key=lambda row: row["id"])
+            corpus = [tokenize(row["source"] + " " + row["text"])
+                      for row in rows]
+            # delta=0：保持正 IDF，但不给完全没有匹配词的文档额外加分。
+            index = BM25Plus(corpus, delta=0) if any(corpus) else None
+            self._bm25_cache = (rows, index)
+        return self._bm25_cache
+
+    def search_candidates(self, query: str, candidate_k: int = 20, mode: str = "hybrid") -> list[dict]:
+        """只召回候选；分数相近不代表证据充分，过滤放在 retrieve 中完成。"""
+        if mode not in {"hybrid", "vector", "bm25"}:
+            raise ValueError("不支持的检索模式。")
+        candidate_k = int(candidate_k)
+        if not 1 <= candidate_k <= 100:
+            raise ValueError("每路候选数量必须在 1–100 之间。")
         if not query.strip():
             return []
         with self._lock:
             count = self.collection.count()
             if not count:
                 return []
-            result = self.collection.query(
-                query_embeddings=self.embed([query]), n_results=min(max(top_k, 1), 8, count),
-                include=["documents", "metadatas", "distances"],
-            )
-        return [dict(id=chunk_id, text=text, **metadata, distance=float(distance))
-                for chunk_id, text, metadata, distance in zip(
-                    result["ids"][0], result["documents"][0],
-                    result["metadatas"][0], result["distances"][0])]
+            merged = {}
+            if mode in {"hybrid", "vector"}:
+                result = self.collection.query(
+                    query_embeddings=self.embed([query]), n_results=min(candidate_k, count),
+                    include=["documents", "metadatas", "distances"],
+                )
+                for rank, (chunk_id, text, meta, distance) in enumerate(zip(
+                        result["ids"][0], result["documents"][0], result["metadatas"][0],
+                        result["distances"][0]), 1):
+                    merged[chunk_id] = dict(id=chunk_id, text=text, **meta,
+                                            distance=float(distance), similarity=1 - float(distance),
+                                            vector_rank=rank, bm25_rank=None, bm25_score=None,
+                                            rrf_score=1 / (RRF_K + rank))
+            if mode in {"hybrid", "bm25"}:
+                rows, index = self._lexical_index()
+                terms = tokenize(query)
+                if index is not None and terms:
+                    scores = index.get_scores(terms)
+                    order = sorted((i for i, score in enumerate(scores) if score > 0),
+                                   key=lambda i: (-float(scores[i]), rows[i]["id"]))[:candidate_k]
+                    for rank, i in enumerate(order, 1):
+                        row = rows[i]
+                        if row["id"] not in merged:
+                            merged[row["id"]] = dict(row, distance=None, similarity=None,
+                                                      vector_rank=None, bm25_rank=None,
+                                                      bm25_score=None, rrf_score=0.0)
+                        hit = merged[row["id"]]
+                        hit.update(bm25_rank=rank, bm25_score=float(scores[i]))
+                        hit["rrf_score"] += 1 / (RRF_K + rank)
+            return sorted(merged.values(), key=lambda hit: (-hit["rrf_score"], hit["id"]))
+
+    def search(self, query: str, top_k: int = 4, candidate_k: int = 20,
+               mode: str = "hybrid") -> list[dict]:
+        top_k = int(top_k)
+        if not 1 <= top_k <= 10:
+            raise ValueError("最终片段上限必须在 1–10 之间。")
+        return self.search_candidates(query, max(top_k, int(candidate_k)), mode)[:top_k]
+
+    def retrieve(self, query: str, top_k=4, candidate_k=20, mode="hybrid",
+                 use_rerank=True, threshold=None, rerank_k=20, scorer=None):
+        """完整检索入口：保留诊断候选，但只把通过过滤的块交给生成模型。"""
+        top_k, rerank_k = int(top_k), int(rerank_k)
+        threshold = DEFAULT_RERANK_THRESHOLD if threshold is None else float(threshold)
+        if not 1 <= top_k <= 10 or not 1 <= rerank_k <= 100:
+            raise ValueError("片段上限须为 1–10，重排候选上限须为 1–100。")
+        if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+            raise ValueError("重排阈值必须是 0–1 的有限数值。")
+        candidates = self.search_candidates(query, max(int(candidate_k), top_k), mode)
+        if use_rerank and candidates:
+            if scorer is None:
+                from rerank import reranker
+                scorer = reranker
+            # 仅精排融合后的前 N 个，控制 CPU 延迟；未重排候选不越过过滤进入回答。
+            limit = max(top_k, rerank_k)
+            ranked = scorer.score(query, candidates[:limit])
+            candidates = ranked + candidates[limit:]
+            selected = select_context([h for h in ranked if h["rerank_score"] >= threshold], top_k)
+        else:
+            selected = select_context(candidates, top_k)
+        selected_ids = {hit["id"] for hit in selected}
+        for hit in candidates:
+            if hit["id"] in selected_ids:
+                hit["decision"] = "已选入回答"
+            elif use_rerank and hit.get("rerank_score") is None:
+                hit["decision"] = "未参与重排"
+            elif use_rerank and hit["rerank_score"] < threshold:
+                hit["decision"] = "低于阈值"
+            else:
+                hit["decision"] = "超出数量或长度上限"
+        return {"candidates": candidates, "selected": selected,
+                "threshold": threshold if use_rerank else None,
+                "use_rerank": use_rerank}
 
     def status(self) -> str:
         with self._lock:
@@ -98,6 +213,7 @@ class KnowledgeBase:
 
 
 def evidence_json(hits: list[dict]) -> str:
+    """只给模型已选中的原文与来源，不把候选分数包装成可信度。"""
     return json.dumps([{
         "citation": f"资料{i}", "source": h["source"],
         "location": h["location"], "text": h["text"],
@@ -105,7 +221,7 @@ def evidence_json(hits: list[dict]) -> str:
 
 
 def source_footer(hits: list[dict]) -> str:
-    """Render sources directly from retrieval metadata, never from model guesses."""
+    """来源标题直接来自索引元数据，并转义原文，避免模型编造来源或注入 HTML。"""
     import html
     if not hits:
         return ""
@@ -113,8 +229,39 @@ def source_footer(hits: list[dict]) -> str:
     for i, hit in enumerate(hits, 1):
         title = html.escape(f"[资料{i}] {hit['source']} · {hit['location']}")
         text = html.escape(hit["text"])
-        lines.append(f"<details><summary>{title}</summary><pre>{text}</pre></details>")
+        scores = html.escape(score_description(hit))
+        lines.append(f"<details><summary>{title}</summary><p>{scores}</p><pre>{text}</pre></details>")
     return "\n\n".join(lines)
+
+
+def score_description(hit: dict) -> str:
+    def show(key):
+        value = hit.get(key)
+        return "未入选该路候选" if value is None else f"{value:.4f}"
+    return (f"向量相似度：{show('similarity')}；BM25：{show('bm25_score')}；"
+            f"RRF：{show('rrf_score')}；重排：{show('rerank_score')}。这些分数不是答案正确率。")
+
+
+def candidate_table(hits: list[dict], top_k: int, selected=None) -> list[list]:
+    # 阈值可能让中间若干块被排除，引用编号必须按实际入选集合编号，不能按候选行号推算。
+    selected = hits[:top_k] if selected is None else selected
+    references = {hit["id"]: f"资料{i}" for i, hit in enumerate(selected, 1)}
+    return [[i, references.get(hit["id"], "未送入回答"), hit["source"], hit["location"],
+             hit.get("similarity"), hit.get("bm25_score"), hit.get("rrf_score"),
+             hit.get("vector_rank"), hit.get("bm25_rank"), hit["text"][:180],
+             hit.get("rerank_score"), hit.get("decision", ""), hit.get("rerank_windows")]
+            for i, hit in enumerate(hits, 1)]
+
+
+def select_context(candidates: list[dict], top_k: int, max_chars: int = 12000) -> list[dict]:
+    """同时限制片段数量和总字符数，避免用户调大 K 后耗尽上下文。"""
+    selected, used = [], 0
+    for hit in candidates[:top_k]:
+        if used + len(hit["text"]) > max_chars:
+            break
+        selected.append(hit)
+        used += len(hit["text"])
+    return selected
 
 
 knowledge_base = KnowledgeBase()

@@ -1,4 +1,4 @@
-# 完整环境；已有 agent-dev 环境可复用，新增依赖仅 pypdf。
+# 完整环境；项目 .venv 复用已有 agent-dev 环境。
 chromadb==1.5.9
 gradio==6.31.0
 openai-agents==0.24.0
@@ -6,3 +6,8 @@ httpx==0.28.1
 python-dotenv>=1.0,<2
 tavily-python>=0.5,<1
 pypdf==7.1.0
+rank-bm25==0.2.2
+jieba==0.42.1
+# CPU INT8 重排直接复用 ONNX Runtime，无需 PyTorch / CUDA。
+onnxruntime==1.31.1
+tokenizers==0.23.3
