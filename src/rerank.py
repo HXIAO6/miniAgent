@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 import math
-import os
 from pathlib import Path
 import threading
 
 import numpy as np
+if __package__:
+    from .config import settings, logger
+else:
+    from config import settings, logger
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL_DIR = PROJECT_DIR / "models" / "bge-reranker-base"
+PROJECT_DIR = settings.project_dir
+DEFAULT_MODEL_DIR = settings.rerank_model_dir
 
 
 class LocalReranker:
     def __init__(self, model_dir=None, batch_size=4, threads=6):
-        self.model_dir = Path(model_dir or os.getenv("RAG_RERANK_MODEL_DIR", str(DEFAULT_MODEL_DIR)))
+        self.model_dir = Path(model_dir or DEFAULT_MODEL_DIR)
         self.batch_size = batch_size
         self.threads = threads
         self._lock = threading.Lock()
@@ -45,6 +48,7 @@ class LocalReranker:
         query_tokenizer.no_truncation()
         query_tokenizer.no_padding()
         self._tokenizer, self._query_tokenizer, self._session = tokenizer, query_tokenizer, session
+        logger.info("本地重排模型加载完成，设备=CPU")
 
     def score(self, query: str, hits: list[dict]) -> list[dict]:
         if not hits:

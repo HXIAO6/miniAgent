@@ -9,14 +9,17 @@ from pathlib import Path
 import re
 import tempfile
 
-from dotenv import load_dotenv
 
 
 # 解析、分块、调用 Ollama BGE-M3、更新向量库
 
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-from rag import KnowledgeBase, SUPPORTED_EXTENSIONS, knowledge_base
+if __package__:
+    from .config import logger
+    from .rag import KnowledgeBase, SUPPORTED_EXTENSIONS, knowledge_base
+else:
+    from config import logger
+    from rag import KnowledgeBase, SUPPORTED_EXTENSIONS, knowledge_base
 
 MAX_FILE_BYTES = 30 * 1024 * 1024
 CHUNK_CHARS = 1200
@@ -174,7 +177,9 @@ def import_files(paths, chunk_chars: int = CHUNK_CHARS, overlap_chars: int = OVE
     for path in paths:
         try:
             results.append(ingest_file(path, chunk_chars=chunk_chars, overlap_chars=overlap_chars))
+            logger.info("文档导入完成")
         except Exception as error:
+            logger.error("文档导入失败，类型=%s", type(error).__name__)
             results.append(f"导入失败：{Path(path).name}：{error}")
     return "\n".join(results)
 

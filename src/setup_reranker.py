@@ -4,8 +4,12 @@ import json
 from pathlib import Path
 
 import httpx
+if __package__:
+    from .config import settings
+else:
+    from config import settings
 
-MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "bge-reranker-base"
+MODEL_DIR = settings.rerank_model_dir
 REPO = "Xenova/bge-reranker-base"
 REVISION = "280bcc27a84e0b898c251e06fddb25171bd9b101"
 FILES = {

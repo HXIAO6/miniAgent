@@ -1,5 +1,6 @@
 """Integration checks with real local Ollama; never touch the production collection."""
 from pathlib import Path
+import os
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from ingest import ingest_file, make_chunks, extract_sections
 from rag import KnowledgeBase, evidence_json, source_footer
 
 
+@unittest.skipIf(os.getenv("MINIAGENT_OFFLINE_TESTS") == "1", "离线 CI 不调用 Ollama；本地运行完整集成测试")
 class RagIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

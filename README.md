@@ -114,23 +114,14 @@ ollama pull bge-m3
 
 ### 3. 配置模型服务
 
-在项目根目录创建 `.env`，填入自己的服务地址和密钥：
+复制项目根目录的 `.env.example` 为 `.env`，再填入自己的服务地址和密钥：
 
 ```dotenv
-# 以下地址与密钥均为占位示例，请替换。
-OPENAI_API_KEY=your_model_api_key
-OPENAI_BASE_URL=https://your-provider.example/v1
-
-# 本地 embedding 配置
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-RAG_EMBED_MODEL=bge-m3:latest
-
-# 使用联网搜索时配置
-TAVILY_API_KEY=your_tavily_api_key
+Copy-Item .env.example .env
+# 然后编辑 .env，至少填写 OPENAI_API_KEY 和 OPENAI_BASE_URL
 ```
 
-**生成模型名称目前写在代码中**：`src/knowledge_assistant.py` 中主 Agent 和摘要 Agent
-都使用 `model="deepseek-flash"`。如果你的服务不提供这个名称，请将这两处改为服务支持的模型 ID。
+主 Agent 和摘要 Agent 的模型由 `CHAT_MODEL`、`SUMMARY_MODEL` 配置，不需要修改源码。
 所选模型还需支持应用使用的流式输出和工具调用接口。
 
 `.env` 不应上传到 GitHub；仓库已在 `.gitignore` 中排除它。
@@ -143,6 +134,9 @@ TAVILY_API_KEY=your_tavily_api_key
 
 浏览器访问 **[http://127.0.0.1:7860](http://127.0.0.1:7860)**。
 默认只监听本机地址。
+
+启动时会执行只读自检，检查 Ollama embedding、重排模型、生成模型配置和 ChromaDB 状态。
+运行日志写入 `data/logs/miniagent.log`，不会记录问题正文、API Key 或检索原文。
 
 ## 使用方法
 
@@ -242,6 +236,26 @@ miniAgent/
 
 运行目录以项目根目录为基准。Ollama 模型继续由 Ollama 管理，不会自动复制到 `models/`。
 
+## 配置项
+
+所有运行配置集中在 `src/config.py`，通过 `.env` 覆盖：
+
+| 变量 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `OPENAI_API_KEY` | 无 | 生成模型服务密钥 |
+| `OPENAI_BASE_URL` | 无 | OpenAI 兼容 Chat Completions 地址 |
+| `CHAT_MODEL` | `deepseek-flash` | 主回答模型 |
+| `SUMMARY_MODEL` | `CHAT_MODEL` | 历史压缩模型 |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | 本地 Ollama 地址 |
+| `RAG_EMBED_MODEL` | `bge-m3:latest` | embedding 模型 |
+| `RAG_RERANK_MODEL_DIR` | `models/bge-reranker-base` | 本地 ONNX 重排模型目录 |
+| `TAVILY_API_KEY` | 空 | 可选联网搜索密钥 |
+| `APP_HOST` / `APP_PORT` | `127.0.0.1` / `7860` | 网页监听地址 |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
+| `STRICT_KNOWLEDGE_DEFAULT` | `true` | 是否默认仅依据知识库回答 |
+
+相对路径以项目根目录为基准。配置错误或外部服务不可用时，启动自检会给出提示；程序不会打印密钥。
+
 ## 测试与评估
 
 在项目根目录执行：
@@ -271,6 +285,9 @@ miniAgent/
 多文档、无答案和部分有答案场景。报告保存在 `.cache/` 下。
 这些结果用于回归与调参，不能等同于真实资料的回答准确率。
 
+GitHub Actions 会在 push 和 pull request 时执行 Python 3.11 依赖安装、语法检查和离线单元测试。
+需要 Ollama 或生成模型服务的集成测试只在本机手动运行。
+
 ## 当前边界
 
 - **文档：** 单文件不超过 30 MiB；扫描 PDF 需先 OCR，暂不支持 Word、Excel 或图片直接入库。
@@ -282,7 +299,7 @@ miniAgent/
 
 ## GitHub 提交说明
 
-`.gitignore` 已排除密钥文件、原始资料、向量库、模型、聊天记录和缓存。
+`.gitignore` 已排除密钥文件、原始资料、向量库、模型、日志、聊天记录和缓存。
 **此前已经被 Git 跟踪的文件不会因为新增忽略规则而自动排除。** 推送前可检查：
 
 ```powershell

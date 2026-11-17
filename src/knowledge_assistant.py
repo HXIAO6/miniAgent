@@ -14,13 +14,22 @@ import os
 import time
 from pathlib import Path
 
-# 上传缓存也保存在 D 盘项目内。必须在导入 Gradio 前设置。
-os.environ["GRADIO_TEMP_DIR"] = str(Path(__file__).resolve().parents[1] / ".cache" / "gradio")
+# 上传缓存放在项目内。必须在导入 Gradio 前设置。
+if __package__:
+    from .config import settings, logger
+    from .startup_check import format_startup_checks, run_startup_checks
+    from .rag import knowledge_base, evidence_json, source_footer, candidate_table, DEFAULT_RERANK_THRESHOLD
+    from .ingest import import_files
+else:
+    from config import settings, logger
+    from startup_check import format_startup_checks, run_startup_checks
+    from rag import knowledge_base, evidence_json, source_footer, candidate_table, DEFAULT_RERANK_THRESHOLD
+    from ingest import import_files
+os.environ["GRADIO_TEMP_DIR"] = str(settings.project_dir / ".cache" / "gradio")
 
 # Gradio 负责网页界面；agents 负责调用大模型和工具。
 import gradio as gr
 from agents import Agent, ModelSettings, Runner, function_tool, set_default_openai_api, set_tracing_disabled
-from dotenv import load_dotenv
 from tavily import TavilyClient
 
 
@@ -30,20 +39,17 @@ from tavily import TavilyClient
 
 
 # 所有相对路径都以项目根目录为准，避免从不同目录启动时找不到文件。
-project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(project_dir, ".env"))
-from rag import knowledge_base, evidence_json, source_footer, candidate_table, DEFAULT_RERANK_THRESHOLD
-from ingest import import_files
+project_dir = str(settings.project_dir)
 set_tracing_disabled(True)
 set_default_openai_api("chat_completions")
-base_url = os.getenv("OPENAI_BASE_URL")
+base_url = settings.openai_base_url
 if base_url:
     os.environ["OPENAI_API_BASE"] = base_url
 # 对话历史放在项目下的 sessions 目录，不混入模型请求内容之外的临时数据。
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-history_dir = os.path.join(project_dir, "sessions")
+tavily_client = TavilyClient(api_key=settings.tavily_api_key or None)
+history_dir = str(settings.sessions_dir)
 os.makedirs(history_dir, exist_ok=True)
-HISTORY_FILE = os.path.join(history_dir, "knowledge_history.json")
+HISTORY_FILE = str(settings.history_file)
 ALLOWED_DIR = os.path.normcase(os.path.realpath(project_dir))
 
 # 下面四个函数会注册成 Agent 可以主动调用的工具。
@@ -54,6 +60,8 @@ def get_current_time() -> str:
 @function_tool
 def search_web(query: str) -> str:
     """联网搜索最新信息，并把搜索摘要交给模型。"""
+    if not settings.tavily_api_key:
+        return "联网搜索未配置，请在 .env 中设置 TAVILY_API_KEY。"
     try:
         response = tavily_client.search(query=query, search_depth="basic", max_results=3)
         results = response.get("results", [])
@@ -100,7 +108,7 @@ def write_local_file(file_path: str, content: str) -> str:
 
 my_agent = Agent(
     name="全能助手",
-    model="deepseek-flash",
+    model=settings.chat_model,
     instructions="""你是一个严格执行指令的助手。
 1. 遇到最新信息，必须调用 search_web。
 2. 任何关于现在时间的问题，必须调用 get_current_time。
@@ -116,7 +124,7 @@ my_agent = Agent(
 # 历史消息过多时，用一个较短的摘要替换旧消息，控制上下文长度。
 summarizer_agent = Agent(
     name="记忆压缩大师",
-    model="deepseek-flash",
+    model=settings.summary_model,
     instructions="把历史对话浓缩成不超过 400 字的摘要，提取用户偏好、记忆要求和任务结果，直接输出摘要。",
 )
 
@@ -177,7 +185,7 @@ def load_history():
 
 async def predict(message, history, use_knowledge=True, top_k=4, candidate_k=20,
                   retrieval_mode="hybrid", show_scores=False, use_rerank=True,
-                  rerank_threshold=DEFAULT_RERANK_THRESHOLD, rerank_k=20, only_knowledge=True):
+                  rerank_threshold=DEFAULT_RERANK_THRESHOLD, rerank_k=20, only_knowledge=settings.strict_knowledge_default):
     """Gradio 的流式回调：整理历史、调用 Agent，并逐片更新聊天窗口。"""
     history = history or []
     if not isinstance(message, str) or not message.strip():
@@ -289,6 +297,7 @@ async def predict(message, history, use_knowledge=True, top_k=4, candidate_k=20,
                 ui_history[-1]["content"] = render_assistant_message(current_reply, thinking_text, time.monotonic() - started_at, True)
                 yield "", ui_history
     except Exception as error:
+        logger.error("聊天请求失败，类型=%s", type(error).__name__)
         ui_history[-1]["content"] = render_assistant_message(f"❌ 发生错误: {error}", thinking_text, time.monotonic() - started_at, False)
         if show_scores:
             yield "", ui_history, candidate_table(candidates, len(retrieved), retrieved)
@@ -311,7 +320,7 @@ async def predict(message, history, use_knowledge=True, top_k=4, candidate_k=20,
         with open(HISTORY_FILE, "w", encoding="utf-8") as file:
             json.dump(ui_history, file, ensure_ascii=False, indent=2)
     except OSError as error:
-        print(f"保存失败: {error}")
+        logger.error("聊天记录保存失败，类型=%s", type(error).__name__)
 
 def clear_history():
     """同时清空网页聊天记录和磁盘上的历史文件。"""
@@ -327,7 +336,7 @@ async def upload_documents(files, chunk_chars=1200, overlap_chars=180):
 
 async def predict_with_scores(message, history, use_knowledge, top_k, candidate_k, retrieval_mode,
                               use_rerank=True, rerank_threshold=DEFAULT_RERANK_THRESHOLD,
-                              rerank_k=20, only_knowledge=True):
+                              rerank_k=20, only_knowledge=settings.strict_knowledge_default):
     """前端同时更新聊天与候选表；流式文字到达时保留已经展示的分数。"""
     first = True
     async for result in predict(message, history, use_knowledge, top_k, candidate_k, retrieval_mode,
@@ -414,7 +423,7 @@ with gr.Blocks(title="本地知识库助手") as demo:
         delete_button = gr.Button("删除所选文档", variant="stop")
         deletion_status = gr.Textbox(label="删除结果", interactive=False)
     use_knowledge = gr.Checkbox(value=True, label="优先检索知识库（普通闲聊时可关闭）")
-    only_knowledge = gr.Checkbox(value=True, label="仅依据知识库回答（无依据时直接说明；关闭联网和文件工具）")
+    only_knowledge = gr.Checkbox(value=settings.strict_knowledge_default, label="仅依据知识库回答（无依据时直接说明；关闭联网和文件工具）")
     with gr.Accordion("检索设置与候选分数", open=False):
         retrieval_mode = gr.Dropdown(choices=[("混合检索（推荐）", "hybrid"),
                                              ("仅向量检索", "vector"), ("仅关键词 BM25", "bm25")],
@@ -450,4 +459,6 @@ with gr.Blocks(title="本地知识库助手") as demo:
     demo.load(refresh_document_panel, None, panel_outputs)
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True, theme=gr.themes.Soft())
+    checks = run_startup_checks()
+    logger.info("\n%s", format_startup_checks(checks))
+    demo.launch(server_name=settings.host, server_port=settings.port, inbrowser=True, theme=gr.themes.Soft())

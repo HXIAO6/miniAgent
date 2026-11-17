@@ -15,13 +15,17 @@ from chromadb.config import Settings
 import httpx
 import jieba
 from rank_bm25 import BM25Plus
+if __package__:
+    from .config import settings, logger
+else:
+    from config import settings, logger
 
 # 检索分三阶段：两路召回 → RRF 融合 → 可选重排与阈值过滤。
 
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
-KNOWLEDGE_DIR = PROJECT_DIR / "knowledge"
-CHROMA_DIR = PROJECT_DIR / "data" / "chroma"
+PROJECT_DIR = settings.project_dir
+KNOWLEDGE_DIR = settings.knowledge_dir
+CHROMA_DIR = settings.chroma_dir
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
 RRF_K = 60  # 融合只使用各通道名次，避免直接相加不同尺度的原始分数。
 DEFAULT_RERANK_THRESHOLD = 0.2  # 合成校准集的初始工作点；真实资料仍需调参，不代表正确率。
@@ -51,8 +55,8 @@ class KnowledgeBase:
     def __init__(self, db_path=None, knowledge_dir=None, model=None, ollama_url=None):
         self.knowledge_dir = Path(knowledge_dir or KNOWLEDGE_DIR).resolve()
         self.db_path = Path(db_path or CHROMA_DIR).resolve()
-        self.model = model or os.getenv("RAG_EMBED_MODEL", "bge-m3:latest")
-        self.ollama_url = (ollama_url or os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")).rstrip("/")
+        self.model = model or settings.embedding_model
+        self.ollama_url = (ollama_url or settings.ollama_base_url).rstrip("/")
         self._lock = threading.RLock()
         self._collection = None
         self._client = None
@@ -90,6 +94,7 @@ class KnowledgeBase:
                     response.raise_for_status()
                     result = response.json()["embeddings"]
                 except (httpx.HTTPError, KeyError, ValueError) as error:
+                    logger.error("Embedding 请求失败，类型=%s", type(error).__name__)
                     raise RuntimeError(
                         f"Ollama 向量生成失败，请确认服务和模型 {self.model} 可用：{error}"
                     ) from error
@@ -184,7 +189,10 @@ class KnowledgeBase:
         candidates = self.search_candidates(query, max(int(candidate_k), top_k), mode)
         if use_rerank and candidates:
             if scorer is None:
-                from rerank import reranker
+                if __package__:
+                    from .rerank import reranker
+                else:
+                    from rerank import reranker
                 scorer = reranker
             # 仅精排融合后的前 N 个，控制 CPU 延迟；未重排候选不越过过滤进入回答。
             limit = max(top_k, rerank_k)
@@ -203,6 +211,7 @@ class KnowledgeBase:
                 hit["decision"] = "低于阈值"
             else:
                 hit["decision"] = "超出数量或长度上限"
+        logger.info("检索完成，方式=%s，候选=%d，入选=%d，重排=%s", mode, len(candidates), len(selected), use_rerank)
         return {"candidates": candidates, "selected": selected,
                 "threshold": threshold if use_rerank else None,
                 "use_rerank": use_rerank}
@@ -287,6 +296,7 @@ class KnowledgeBase:
                 record["state"] = "deleted"
                 save_record()
             except Exception as error:
+                logger.error("文档删除失败，开始回滚，类型=%s", type(error).__name__)
                 # 删除调用可能已经部分生效，因此只要尝试过就恢复快照；BM25 下次读取最新库。
                 rollback_errors = []
                 if db_attempted:
@@ -312,7 +322,9 @@ class KnowledgeBase:
                 except Exception as record_error:
                     rollback_errors.append(f"状态写入失败：{record_error}")
                 detail = "；".join(rollback_errors) if rollback_errors else "原文与索引已恢复"
+                logger.warning("删除回滚结果=%s", record["state"])
                 raise RuntimeError(f"删除失败：{error}；{detail}。恢复材料：{batch}") from error
+            logger.info("文档删除完成，移除块数=%d，原文件回收=%s", len(snapshot["ids"]), moved)
             return {"source": source, "chunk_count": len(snapshot["ids"]),
                     "file_recycled": moved, "trash_path": str(batch)}
 

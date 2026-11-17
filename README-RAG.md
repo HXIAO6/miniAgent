@@ -12,11 +12,11 @@ Set-Location D:\miniAgent
 ```
 
 浏览器访问 `http://127.0.0.1:7860`。先确保 Ollama 已启动，且 `ollama list` 包含 `bge-m3:latest`。
-大模型继续使用项目 `.env` 中原有连接配置。
+大模型、embedding、重排、端口和日志级别统一从项目 `.env` 读取，示例见 `.env.example`。
 VS Code 的项目默认解释器也已指向 `.venv`；若之前手动选择过解释器，
 请在状态栏重新选择 `D:\miniAgent\.venv\Scripts\python.exe`。
 
-本地 `.venv` 位于 D 盘，通过 `--system-site-packages` 复用已有的
+本地 `.venv` 位于项目目录，通过 `--system-site-packages` 复用已有的
 `C:\Users\PC\.conda\envs\agent-dev` 依赖；新增的 pypdf、rank-bm25、jieba 安装在 D 盘。
 该环境依赖原有 agent-dev 环境，并非可独立搬走的环境。
 `requirements-rag.txt` 提供独立重建环境时的依赖清单。
