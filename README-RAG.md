@@ -103,7 +103,11 @@ Sigmoid 把模型原始分数映射为 0–1，但它不是答案正确概率。
 - `knowledge/.versions/<内容哈希>/`：同名更新时保留旧原文；不同资料请使用不同文件名。
 - `data/chroma/`：持久化向量库；不要在程序运行时手工修改里面的文件。
 - `.cache/gradio/`：网页上传缓存。
-- `sessions/knowledge_history.json`：新助手专用聊天记录，不覆盖旧版 `history.json`。
+- `data/memory.sqlite3`：当前短期会话和消息；SQLite 使用事务与 WAL 持久化。
+- `sessions/knowledge_history.json`：迁移前的旧 JSON 备份，首次启动后保留，不再作为主存储。
+
+短期记忆只保存用户消息、助手消息和会话元数据；当前没有自动提取用户偏好、长期事实或记忆向量。
+上下文消息超过 30 条时会压缩较早内容，并保留最近 8 条消息原文；SQLite 中的完整历史不会被删除。
 - `.venv/`：D 盘虚拟环境。
 - `models/bge-reranker-base/`：重排模型、tokenizer 与下载版本记录。
 - `data/trash/<UTC 时间与唯一批次号>/`：删除的原文和索引恢复快照。

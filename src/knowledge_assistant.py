@@ -11,6 +11,7 @@ import datetime
 import html
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -20,11 +21,13 @@ if __package__:
     from .startup_check import format_startup_checks, run_startup_checks
     from .rag import knowledge_base, evidence_json, source_footer, candidate_table, DEFAULT_RERANK_THRESHOLD
     from .ingest import import_files
+    from .memory_store import MemoryStore
 else:
     from config import settings, logger
     from startup_check import format_startup_checks, run_startup_checks
     from rag import knowledge_base, evidence_json, source_footer, candidate_table, DEFAULT_RERANK_THRESHOLD
     from ingest import import_files
+    from memory_store import MemoryStore
 os.environ["GRADIO_TEMP_DIR"] = str(settings.project_dir / ".cache" / "gradio")
 
 # Gradio 负责网页界面；agents 负责调用大模型和工具。
@@ -50,6 +53,8 @@ tavily_client = TavilyClient(api_key=settings.tavily_api_key or None)
 history_dir = str(settings.sessions_dir)
 os.makedirs(history_dir, exist_ok=True)
 HISTORY_FILE = str(settings.history_file)
+_memory_store = None
+_memory_store_path = None
 ALLOWED_DIR = os.path.normcase(os.path.realpath(project_dir))
 
 # 下面四个函数会注册成 Agent 可以主动调用的工具。
@@ -129,11 +134,11 @@ summarizer_agent = Agent(
 )
 
 async def compress_history(conversation_history):
-    """保留最近四条消息，把更早的消息压缩成 system 摘要。"""
-    if len(conversation_history) <= 12:
+    """超过 30 条消息时压缩旧内容，只保留最近 8 条原文。"""
+    if len(conversation_history) <= 30:
         return conversation_history
     valid = [message for message in conversation_history if message["role"] != "system"]
-    old_messages, recent_messages = valid[:-4], valid[-4:]
+    old_messages, recent_messages = valid[:-8], valid[-8:]
     history_text = "\n".join(f"{message['role']}: {message['content']}" for message in old_messages)
     result = await Runner.run(summarizer_agent, f"请压缩以下对话：\n{history_text}")
     return [{"role": "system", "content": f"【前情提要】: {result.final_output}"}] + recent_messages
@@ -168,20 +173,27 @@ def render_assistant_message(answer, thinking, elapsed_seconds, expanded):
     return f"<details{open_attribute}>\n<summary>用时 {elapsed}</summary>\n\n{thinking_content}\n\n</details>\n\n{answer}"
 
 def load_history():
-    """读取并清理历史，兼容旧版本保存的消息结构。"""
-    try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return []
-    cleaned = []
-    for item in data if isinstance(data, list) else []:
-        if not isinstance(item, dict):
-            continue
-        role, content = item.get("role"), message_content_to_text(item.get("content"))
-        if role in {"user", "assistant"} and content.strip():
-            cleaned.append({"role": role, "content": content})
-    return cleaned
+    """从 SQLite 读取短期记忆；首次打开时自动导入旧 JSON。"""
+    return _get_memory_store().load_messages()
+
+
+def _get_memory_store():
+    """测试替换 HISTORY_FILE 时同步使用隔离数据库，生产环境始终使用 data/memory.sqlite3。"""
+    global _memory_store, _memory_store_path
+    path = str(settings.memory_db) if HISTORY_FILE == str(settings.history_file) else str(Path(HISTORY_FILE).with_suffix(".sqlite3"))
+    if _memory_store is None or _memory_store_path != path:
+        _memory_store = MemoryStore(path, HISTORY_FILE)
+        _memory_store_path = path
+    return _memory_store
+
+
+def _persist_turn(ui_history):
+    """只追加当前轮，不再覆盖整个历史文件；界面 HTML 仍按旧格式保存。"""
+    if len(ui_history) < 2:
+        return
+    user = ui_history[-2].get("content", "") if ui_history[-2].get("role") == "user" else ""
+    assistant = ui_history[-1].get("content", "") if ui_history[-1].get("role") == "assistant" else ""
+    _get_memory_store().append_turn(message_content_to_text(user), message_content_to_text(assistant))
 
 async def predict(message, history, use_knowledge=True, top_k=4, candidate_k=20,
                   retrieval_mode="hybrid", show_scores=False, use_rerank=True,
@@ -263,8 +275,7 @@ async def predict(message, history, use_knowledge=True, top_k=4, candidate_k=20,
                 current_reply = "当前知识库中没有找到足够相关的资料，无法依据已有文档回答。请补充资料或检查检索设置。"
                 ui_history[-1]["content"] = render_assistant_message(current_reply, thinking_text, time.monotonic() - started_at, False)
                 yield ("", ui_history, candidate_table(candidates, 0, [])) if show_scores else ("", ui_history)
-                with open(HISTORY_FILE, "w", encoding="utf-8") as file:
-                    json.dump(ui_history, file, ensure_ascii=False, indent=2)
+                _persist_turn(ui_history)
                 return
             # 严格知识库模式禁用联网及文件工具，防止模型绕过选中的资料补全未知事实。
             active_agent = my_agent.clone(
@@ -317,17 +328,13 @@ async def predict(message, history, use_knowledge=True, top_k=4, candidate_k=20,
         else:
             yield "", ui_history
     try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as file:
-            json.dump(ui_history, file, ensure_ascii=False, indent=2)
-    except OSError as error:
+        _persist_turn(ui_history)
+    except (OSError, RuntimeError, sqlite3.Error) as error:
         logger.error("聊天记录保存失败，类型=%s", type(error).__name__)
 
 def clear_history():
-    """同时清空网页聊天记录和磁盘上的历史文件。"""
-    try:
-        os.remove(HISTORY_FILE)
-    except FileNotFoundError:
-        pass
+    """清空 SQLite 当前会话；保留旧 JSON 备份，不删除知识库。"""
+    _get_memory_store().clear()
     return [], ""
 
 async def upload_documents(files, chunk_chars=1200, overlap_chars=180):
