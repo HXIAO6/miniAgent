@@ -406,10 +406,46 @@ async def delete_documents(sources, confirmed):
         return result + f"\n清单刷新失败：{error}，请手动刷新。", gr.skip(), gr.skip(), gr.skip(), False, "", []
 
 
+UI_CSS = """
+/* 提高主要输入区域的对比度和可点击面积，避免被高级设置淹没。 */
+.question-input textarea {
+    min-height: 96px !important;
+    font-size: 18px !important;
+    line-height: 1.6 !important;
+    color: #111827 !important;
+    background: #ffffff !important;
+    border: 2px solid #60a5fa !important;
+    border-radius: 8px !important;
+}
+.question-input textarea::placeholder {
+    color: #4b5563 !important;
+    opacity: 1 !important;
+}
+.module-panel {
+    border: 2px solid #2563eb !important;
+    border-radius: 12px !important;
+    background: #eff6ff !important;
+    padding: 6px 10px 12px !important;
+    margin-bottom: 14px !important;
+}
+.module-panel > .label-wrap {
+    color: #1d4ed8 !important;
+    font-weight: 700 !important;
+}
+.chat-panel {
+    border: 2px solid #2563eb !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+    margin-bottom: 14px !important;
+}
+.clear-chat-row { justify-content: center !important; }
+.clear-chat-row button { min-width: 150px !important; }
+"""
+
 with gr.Blocks(title="本地知识库助手") as demo:
     gr.Markdown("# 🤖 本地知识库助手")
     gr.Markdown("上传资料后提问，回答附来源与原文。检索在本机完成，命中的片段会发送给当前配置的大模型服务。")
-    with gr.Accordion("知识库管理", open=True):
+    with gr.Accordion("知识库管理", open=True, elem_classes="module-panel"):
         files = gr.File(label="选择资料（TXT、Markdown、文字版 PDF）", file_count="multiple",
                         file_types=[".txt", ".md", ".pdf"], type="filepath")
         gr.Markdown("单文件上限 30 MiB。同名文件作为同一文档更新，旧原文件保留在 knowledge/.versions 中。扫描 PDF 请先做 OCR。")
@@ -431,7 +467,7 @@ with gr.Blocks(title="本地知识库助手") as demo:
         deletion_status = gr.Textbox(label="删除结果", interactive=False)
     use_knowledge = gr.Checkbox(value=True, label="优先检索知识库（普通闲聊时可关闭）")
     only_knowledge = gr.Checkbox(value=settings.strict_knowledge_default, label="仅依据知识库回答（无依据时直接说明；关闭联网和文件工具）")
-    with gr.Accordion("检索设置与候选分数", open=False):
+    with gr.Accordion("检索设置与候选分数", open=False, elem_classes="module-panel"):
         retrieval_mode = gr.Dropdown(choices=[("混合检索（推荐）", "hybrid"),
                                              ("仅向量检索", "vector"), ("仅关键词 BM25", "bm25")],
                                      value="hybrid", label="检索方式")
@@ -447,9 +483,12 @@ with gr.Blocks(title="本地知识库助手") as demo:
                                        "BM25 分数", "RRF 分数", "向量名次", "BM25 名次", "原文预览", "重排分数", "筛选结果", "评分窗口数"],
                               datatype=["number", "str", "str", "str", "number", "number", "number", "number", "number", "str", "number", "str", "number"],
                               interactive=False, label="最近一次提问的检索候选")
-    chatbot = gr.Chatbot(height=600, value=load_history())
-    msg = gr.Textbox(placeholder="输入你的问题，按回车发送...", label="输入框")
-    clear = gr.Button("清空聊天记录（保留知识库）")
+    chatbot = gr.Chatbot(height=600, value=load_history(), elem_classes="chat-panel")
+    gr.Markdown("## 💬 输入问题")
+    msg = gr.Textbox(placeholder="请在这里输入问题；支持多行文字，按回车发送...",
+                     label="问题", lines=3, max_lines=8, elem_classes="question-input")
+    with gr.Row(elem_classes="clear-chat-row"):
+        clear = gr.Button("清空聊天", variant="secondary", scale=0, min_width=150)
     msg.submit(predict_with_scores, [msg, chatbot, use_knowledge, top_k, candidate_k, retrieval_mode,
                                    use_rerank, rerank_threshold, rerank_k, only_knowledge],
                [msg, chatbot, scores], concurrency_limit=1, concurrency_id="knowledge_operations")
@@ -468,4 +507,5 @@ with gr.Blocks(title="本地知识库助手") as demo:
 if __name__ == "__main__":
     checks = run_startup_checks()
     logger.info("\n%s", format_startup_checks(checks))
-    demo.launch(server_name=settings.host, server_port=settings.port, inbrowser=True, theme=gr.themes.Soft())
+    demo.launch(server_name=settings.host, server_port=settings.port, inbrowser=True,
+                theme=gr.themes.Soft(), css=UI_CSS)
