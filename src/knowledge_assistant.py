@@ -485,8 +485,11 @@ with gr.Blocks(title="本地知识库助手") as demo:
                               interactive=False, label="最近一次提问的检索候选")
     chatbot = gr.Chatbot(height=600, value=load_history(), elem_classes="chat-panel")
     gr.Markdown("## 💬 输入问题")
-    msg = gr.Textbox(placeholder="请在这里输入问题；支持多行文字，按回车发送...",
-                     label="问题", lines=3, max_lines=8, elem_classes="question-input")
+    # 单行模式让 Enter 触发 submit；Shift+Enter 仍可换行，CSS 保留输入区高度。
+    # 内置发送按钮与 Enter 共用下方的 submit 事件，避免两套处理逻辑。
+    msg = gr.Textbox(placeholder="请输入问题，Enter 发送，Shift+Enter 换行…",
+                     label="问题", lines=1, max_lines=8, submit_btn="发送",
+                     elem_classes="question-input")
     with gr.Row(elem_classes="clear-chat-row"):
         clear = gr.Button("清空聊天", variant="secondary", scale=0, min_width=150)
     msg.submit(predict_with_scores, [msg, chatbot, use_knowledge, top_k, candidate_k, retrieval_mode,
